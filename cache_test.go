@@ -1,149 +1,244 @@
 package cache
 
 import (
-	"strings"
+	"errors"
 	"testing"
+	"time"
 )
 
-func TestSimple(t *testing.T) {
-	mp := make(map[string]string)
-	mp["hello"] = "world"
-	simple := func(pld *Payload, next Next) {
-		body := mp[pld.Key()]
-		if body != "" {
-			pld.Body = body
-			pld.Source = "simple"
-		}
-	}
-	cc := NewCache()
-	cc.Use(simple)
+// Simple cache memory
+type SimpleMemoryCache struct {
+	data map[string]int64
+}
 
-	if cc.Get("hello") != "world" {
-		t.Error("Failed to get data from simple memory cache.")
-	}
+// Set value to map in memory
+func (c *SimpleMemoryCache) Set(ctx *Context, next Next) {
+	c.data[ctx.Key] = ctx.Value.(int64)
 
-	if cc.Get("world") != nil {
-		t.Error("Got wrong data from memory cache.")
+	// call next to make sure all memory cache ready
+	// maybe you should check next is nil or not
+	next(ctx)
+}
+
+// Get get value from memory cache
+func (c *SimpleMemoryCache) Get(ctx *Context, next Next) {
+	// check key in c.data
+	v, ex := c.data[ctx.Key]
+	if ex {
+		// reset value/err/source
+		ctx.Value = v
+		ctx.Err = nil
+		ctx.Source = c.Source()
+		return
+	}
+	// find in chained caches
+	next(ctx)
+	// write back to memory cache
+	if ctx.Err == nil && ctx.Value != nil {
+		c.data[ctx.Key] = ctx.Value.(int64)
 	}
 }
 
-func TestChainedSimple(t *testing.T) {
-	simpleGen := func(name string) Middleware {
-		mp := make(map[string]string)
-		mp[name] = strings.ToUpper(name)
-		return func(pld *Payload, next Next) {
-			body := mp[pld.Key()]
-			if body != "" {
-				pld.Body = mp[pld.Key()]
-				pld.Source = name
-				return
-			}
-			next(pld)
-			if pld.Body != nil {
-				mp[pld.Key()] = pld.Body.(string)
-			}
-		}
-	}
+// delete (expire) particular key
+func (c *SimpleMemoryCache) Del(ctx *Context, next Next) {
+	delete(c.data, ctx.Key)
+}
 
-	cc := NewCache()
-	cc.Use(simpleGen("foo")).Use(simpleGen("bar"))
+// Source return the source name of this memory
+func (c *SimpleMemoryCache) Source() string {
+	return "simple-cache"
+}
 
-	if cc.Get("foo") != "FOO" {
-		t.Error("Failed to get data from simple memory cache.")
-	}
-	if cc.Get("bar") != "BAR" {
-		t.Error("Failed to get data from simple memory cache.")
-	}
-	if cc.Get("hello") != nil {
-		t.Error("Got wrong value from chained cache.")
+// MockSource is a mocked database, like mysql or redis
+type MockSource struct {
+	data map[string]int64
+}
+
+// Set value to mysql
+func (c *MockSource) Set(ctx *Context, next Next) {
+	c.data[ctx.Key] = ctx.Value.(int64)
+	// set it to memory cache, you may not call this if it's not needed.
+	next(ctx)
+}
+
+// Get get value from mysql, no next called
+func (c *MockSource) Get(ctx *Context, next Next) {
+	v, ex := c.data[ctx.Key]
+	if ex {
+		ctx.Source = c.Source()
+		ctx.Value = v
+	} else {
+		ctx.Err = errors.New("Data not exist in mock database")
 	}
 }
 
-func TestGetPayload(t *testing.T) {
-	simpleGen := func(name string) Middleware {
-		mp := make(map[string]string)
-		mp[name] = strings.ToUpper(name)
-		return func(pld *Payload, next Next) {
-			body := mp[pld.Key()]
-			if body != "" {
-				pld.Body = mp[pld.Key()]
-				pld.Source = name
-				return
-			}
-			next(pld)
-			if pld.Body != nil {
-				mp[pld.Key()] = pld.Body.(string)
-			}
-		}
-	}
-	cc := NewCache()
-	cc.Use(simpleGen("foo")).Use(simpleGen("bar"))
+// Del delete some key from mysql, empty function.
+func (c *MockSource) Del(ctx *Context, next Next) {
+	// source cache, like mysql/oss/rdb, etc
+	// do not delete the data in source cache
+}
 
-	pld := NewPld("bar", false)
-	cc.GetPayload(pld)
-	if pld.Body != "BAR" {
-		t.Errorf("Failed to get payload %s != BAR", pld.Body)
-	}
+// Source like the name.
+func (c *MockSource) Source() string {
+	return "mock-source"
+}
 
-	if pld.Source != "bar" {
-		t.Errorf("Got data from wrong source %s != bar", pld.Source)
+// Test a simple cache
+func TestCache(t *testing.T) {
+	cache := New()
+	simpleM := &SimpleMemoryCache{
+		data: make(map[string]int64),
+	}
+	cache.Use(simpleM)
+	now := time.Now().Unix()
+
+	cache.Set("foo", now)
+	cached, err := cache.Get("foo")
+
+	if err != nil {
+		t.Errorf("Failed to get data, err = %s", err)
 	}
 
-	// second time
-	pld = NewPld("bar", false)
-	cc.GetPayload(pld)
-	if pld.Body != "BAR" {
-		t.Errorf("Failed to get cached payload %s != BAR", pld.Body)
-	}
-
-	if pld.Source != "foo" {
-		t.Errorf("Failed to cache FOO to simpl1 %s != foo", pld.Source)
+	if cached != now {
+		t.Errorf("Failed to get, %d != %d", cached, now)
 	}
 }
 
-func TestForce(t *testing.T) {
+// test a simple cache with GetContext
+func TestCacheGetContext(t *testing.T) {
+	cache := New()
+	simpleM := &SimpleMemoryCache{
+		data: make(map[string]int64),
+	}
+	cache.Use(simpleM)
+	now := time.Now().Unix()
 
-	mp1 := make(map[string]string)
-	mp1["test"] = "cached-data"
-	mw1 := func(pld *Payload, next Next) {
-		body := mp1[pld.Key()]
-		if !pld.Force() && body != "" {
-			pld.Body = body
-			pld.Source = "mw1"
-			return
-		}
-		next(pld)
-		if pld.Body != nil {
-			mp1[pld.Key()] = pld.Body.(string)
-		}
+	cache.Set("foo", now)
+	ctx := &Context{
+		Key: "foo",
 	}
 
-	mp2 := make(map[string]string)
-	mp2["test"] = "force-data"
-	mw2 := func(pld *Payload, next Next) {
-		body := mp2[pld.Key()]
-		if body != "" {
-			pld.Body = body
-		}
+	cache.GetContext(ctx)
+
+	if ctx.Err != nil {
+		t.Errorf("Failed to get data, err = %s", ctx.Err)
 	}
 
-	cc := NewCache()
-	cc.Use(mw1)
-	cc.Use(mw2)
-
-	pld := NewPld("test", false)
-
-	cc.GetPayload(pld)
-
-	if pld.Body != "cached-data" {
-		t.Errorf("Failed to get cached data %s != cached-data", pld.Body)
+	if ctx.Value != now {
+		t.Errorf("Failed to get, %d != %d", ctx.Value, now)
 	}
 
-	pld = NewPld("test", true)
-	cc.GetPayload(pld)
+	if ctx.Source != "simple-cache" {
+		t.Errorf("Get data from wrong source, %s", ctx.Source)
+	}
+}
 
-	if pld.Body != "force-data" {
-		t.Errorf("Failed to get force data %s != force-data", pld.Body)
+// Test a simple cahined cache
+func TestChainedCache(t *testing.T) {
+	cache := New()
+	simpleM := &SimpleMemoryCache{
+		data: make(map[string]int64),
+	}
+	sourceM := &MockSource{
+		data: make(map[string]int64),
+	}
+	var sample int64 = 20190102
+	sourceM.data["foo"] = sample
+	cache.Use(simpleM).Use(sourceM)
+
+	// test normal data
+	cached, err := cache.Get("foo")
+
+	if err != nil {
+		t.Errorf("Failed to get data, err = %s", err)
 	}
 
+	if cached != sample {
+		t.Errorf("Failed to get, %d != %d", cached, sample)
+	}
+
+	// test non-existent key
+	cached, err = cache.Get("bar")
+
+	if err == nil {
+		t.Error("Non-existent should return error from source database.")
+	}
+
+	// test invalid key
+	cached, err = cache.Get("")
+	if cached == nil {
+		t.Error("Invalid key should failed.")
+	}
+
+	// set and get
+	sample = 19700101
+	cache.Set("bar", sample)
+	cached, err = cache.Get("")
+	if cached != sample {
+		t.Errorf("Failed to set and get, %d != %d", sample, cached)
+	}
+}
+
+func TestChainedSource(t *testing.T) {
+	cache := New()
+	simpleM := &SimpleMemoryCache{
+		data: make(map[string]int64),
+	}
+	sourceM := &MockSource{
+		data: make(map[string]int64),
+	}
+	var sample int64 = 20190102
+	sourceM.data["foo"] = sample
+	cache.Use(simpleM).Use(sourceM)
+
+	ctx := &Context{
+		Key: "foo",
+	}
+	cache.GetContext(ctx)
+
+	if ctx.Err != nil {
+		t.Error("[1] Failed to get data from mock database.")
+	}
+
+	if ctx.Value != sample {
+		t.Errorf("[1] Got wrong value from mock database, %d != %d.", ctx.Value, sample)
+	}
+
+	if ctx.Source != "mock-source" {
+		t.Errorf("[1] Got wrong source %s != mock-source", ctx.Source)
+	}
+
+	// set and get
+	ctx = &Context{
+		Key: "foo",
+	}
+	cache.GetContext(ctx)
+
+	if ctx.Err != nil {
+		t.Error("[2] Failed to get data from mock database.")
+	}
+
+	if ctx.Value != sample {
+		t.Errorf("[2] Got wrong value from mock database, %d != %d.", ctx.Value, sample)
+	}
+
+	if ctx.Source != "simple-cache" {
+		t.Errorf("[2] Got wrong source %s != simple-cache", ctx.Source)
+	}
+
+	cache.Use(simpleM).Use(sourceM)
+
+	ctx = &Context{
+		Key:   "bar",
+		Value: int64(999),
+	}
+	cache.SetContext(ctx)
+
+	if ctx.Err != nil || sourceM.data["bar"] != 999 {
+		t.Errorf("Failed to set data to mock-database, %d.", sourceM.data["bar"])
+	}
+
+	if simpleM.data["bar"] != 999 {
+		t.Errorf("Failed to set to simple cache, %d.", simpleM.data["bar"])
+	}
 }
