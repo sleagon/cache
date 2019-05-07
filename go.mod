@@ -1,1 +1,1 @@
-module github/sleagon/cache
+module github.com/sleagon/cache
