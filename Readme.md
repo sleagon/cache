@@ -6,10 +6,16 @@ A simple cache framework for golang.
 ## Usage
 
 
-Init a cache:
+A simple memory cache:
 
 ```golang
-import "github.com/sleagon/cache"
+package main
+
+import (
+	"time"
+
+	"github.com/sleagon/cache"
+)
 
 // simple memory cache middleware
 type SimpleMemoryCache struct {
@@ -17,7 +23,7 @@ type SimpleMemoryCache struct {
 }
 
 // Set value to map in memory
-func (c *SimpleMemoryCache) Set(ctx *Context, next Next) {
+func (c *SimpleMemoryCache) Set(ctx *cache.Context, next cache.Next) {
 	c.data[ctx.Key] = ctx.Value.(int64)
 
 	// call next to make sure all memory cache ready
@@ -26,7 +32,7 @@ func (c *SimpleMemoryCache) Set(ctx *Context, next Next) {
 }
 
 // Get get value from memory cache
-func (c *SimpleMemoryCache) Get(ctx *Context, next Next) {
+func (c *SimpleMemoryCache) Get(ctx *cache.Context, next cache.Next) {
 	// check key in c.data
 	v, ex := c.data[ctx.Key]
 	if ex {
@@ -45,7 +51,7 @@ func (c *SimpleMemoryCache) Get(ctx *Context, next Next) {
 }
 
 // delete (expire) particular key
-func (c *SimpleMemoryCache) Del(ctx *Context, next Next) {
+func (c *SimpleMemoryCache) Del(ctx *cache.Context, next cache.Next) {
 	delete(c.data, ctx.Key)
 }
 
@@ -55,16 +61,55 @@ func (c *SimpleMemoryCache) Source() string {
 }
 
 func main() {
-  c := cache.New()
-  simpleM := &SimpleMemoryCache{
-    data: make(map[string]int64),
-  }
-  cache.Use(simpleM)
-  now := time.Now().Unix()
-  cache.Set("foo", now)
-  cached, err := cache.Get("foo")
+	c := cache.New()
+	simpleM := &SimpleMemoryCache{
+		data: make(map[string]int64),
+	}
+	c.Use(simpleM)
+	now := time.Now().Unix()
+	c.Set("foo", now)
+	cached, err := c.Get("foo")
 
-  println(cached, err)
+	println(cached.(int64), err == nil)
+}
+```
+
+## Cache Middleware
+
+All you need is implement Set/Get/Del/Source, the framework will do all left:
+
+```golang
+// MockSource is a mocked database, like mysql or redis
+type MockSource struct {
+	data map[string]int64
 }
 
+// Set value to mysql
+func (c *MockSource) Set(ctx *Context, next Next) {
+	c.data[ctx.Key] = ctx.Value.(int64)
+	// set it to memory cache, you may not call this if it's not needed.
+	next(ctx)
+}
+
+// Get get value from mysql, no next called
+func (c *MockSource) Get(ctx *Context, next Next) {
+	v, ex := c.data[ctx.Key]
+	if ex {
+		ctx.Source = c.Source()
+		ctx.Value = v
+	} else {
+		ctx.Err = errors.New("Data not exist in mock database")
+	}
+}
+
+// Del delete some key from mysql, empty function.
+func (c *MockSource) Del(ctx *Context, next Next) {
+	// source cache, like mysql/oss/rdb, etc
+	// do not delete the data in source cache
+}
+
+// Source like the name.
+func (c *MockSource) Source() string {
+	return "mock-source"
+}
 ```
